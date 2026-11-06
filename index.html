@@ -1,0 +1,742 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Một bước huấn luyện</title>
+<style>
+:root {
+    --bg: #000; --fg: #f2f2f2; --muted: #8a8a8a; --line: #2a2a2a; --chip: #141414;
+    --blue: #58c4dd; --red: #fc6255; --yellow: #ffe45e;
+}
+* { box-sizing: border-box; }
+body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 17px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+main { max-width: 1160px; margin: 0 auto; padding: 36px 16px 64px; }
+h1 { font: 400 clamp(1.8rem, 4vw, 2.8rem)/1.15 "CMU Serif", "Latin Modern Roman", Georgia, serif; margin: 0; }
+.cap { color: var(--muted); margin: 10px 0 22px; max-width: 760px; }
+.cap b { color: var(--fg); font-weight: 600; }
+#scene { display: block; width: 100%; border-radius: 14px; background: #000; border: 1px solid var(--line); }
+.controls { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-top: 14px; }
+.controls .sp { flex: 1; }
+button {
+    font: inherit; font-size: 0.92rem; padding: 6px 14px; border-radius: 99px; cursor: pointer;
+    background: var(--chip); color: var(--fg); border: 1px solid #333;
+}
+button:hover { border-color: #666; }
+button.on { border-color: var(--yellow); color: var(--yellow); font-weight: 600; }
+.credit { color: var(--muted); font-size: 0.85rem; margin-top: 36px; border-top: 1px solid var(--line); padding-top: 14px; }
+.credit a { color: inherit; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; color: var(--muted); font-size: 0.88rem; margin-top: 14px; }
+.legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+</style>
+</head>
+<body>
+<main>
+<h1>Một bước huấn luyện</h1>
+<p class="cap">
+    3 ảnh → <b>3 lượt xuôi</b>, <b>3 lượt ngược</b> → <b>trung bình</b> thành ∇C →
+    <b>cập nhật</b> cả 13.002 tham số. Rồi lặp lại.
+</p>
+<canvas id="scene"></canvas>
+<div class="controls">
+    <button id="play">❚❚ Dừng</button>
+    <button id="restart">Làm lại</button>
+    <button id="ff">Tua 20 bước</button>
+    <span class="sp"></span>
+    <span style="color:var(--muted);font-size:0.9rem">tốc độ</span>
+    <button class="spd" data-s="0.5">0.5×</button>
+    <button class="spd on" data-s="1">1×</button>
+    <button class="spd" data-s="2">2×</button>
+    <button class="spd" data-s="4">4×</button>
+</div>
+<div class="legend">
+    <span><i style="background:var(--blue)"></i>dương</span>
+    <span><i style="background:var(--red)"></i>âm</span>
+    <span><i style="background:var(--yellow)"></i>đang lan truyền ngược</span>
+    <span>mạng 784 → 16 → 16 → 10 thật, số liệu tính thật, η = 1</span>
+</div>
+<p class="credit">
+    Dựa trên series
+    <a href="https://www.youtube.com/playlist?list=PLZHQObOWTQDNU6R1_67000Dx_ZCJB-3pi">Neural Networks</a>
+    của 3Blue1Brown và
+    <a href="https://github.com/karpathy/micrograd">micrograd</a> của Andrej Karpathy.
+    Làm bởi Cong Nguyen cùng Claude.
+</p>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const sig = z => 1 / (1 + Math.exp(-z));
+const BLUE = '#58c4dd', RED = '#fc6255', YEL = '#ffe45e', FG = '#f2f2f2', GREY = '#8a8a8a', DIM = '#2c2c2c';
+const SERIF = '"CMU Serif", "Latin Modern Roman", Georgia, serif';
+const SUB = '₀₁₂₃₄₅₆₇₈₉';
+const sub = n => String(n).split('').map(d => SUB[d]).join('');
+const ease = t => t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
+const clamp01 = t => Math.max(0, Math.min(1, t));
+const fmt = v => (v >= 0 ? '+' : '−') + Math.abs(v).toFixed(3);
+const VW = 1100, VH = 730;
+
+function rng(seed) {
+    return () => {
+        seed = seed + 0x6D2B79F5 | 0;
+        let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+        t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+        return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+}
+
+function gauss(r) {
+    return Math.sqrt(-2 * Math.log(1 - r())) * Math.cos(2 * Math.PI * r());
+}
+
+/* ---------------- data: three rendered digits ---------------- */
+const DIGITS = [
+    { ch: '2', font: 'bold 21px Georgia, serif', rot: -0.08, dx: 0 },
+    { ch: '5', font: 'bold 22px system-ui, sans-serif', rot: 0.1, dx: 1 },
+    { ch: '0', font: 'bold 21px "Trebuchet MS", sans-serif', rot: 0.05, dx: -1 },
+];
+const IMGS = DIGITS.map(d => {
+    const off = document.createElement('canvas');
+    off.width = off.height = 28;
+    const c = off.getContext('2d');
+    c.fillStyle = '#fff';
+    c.font = d.font;
+    c.textAlign = 'center';
+    c.textBaseline = 'middle';
+    c.translate(14 + d.dx, 15);
+    c.rotate(d.rot);
+    c.fillText(d.ch, 0, 0);
+    const px = c.getImageData(0, 0, 28, 28).data, x = new Float64Array(784);
+    for (let i = 0; i < 784; i++) {
+        x[i] = px[i * 4 + 3] / 255;
+    }
+    return { x, y: +d.ch };
+});
+
+/* ---------------- the network ---------------- */
+const SIZES = [784, 16, 16, 10], ETA = 1, NPARAM = 13002;
+/* flat layout: W1 (12544), b1 (16), W2 (256), b2 (16), W3 (160), b3 (10) */
+const OFF = { W: [0, 12560, 12832], b: [12544, 12816, 12992] };
+const ROWS = [406, 12600, 12900, 13001];
+let NET;
+
+function initNet() {
+    const r = rng(42);
+    NET = { W: [], b: [] };
+    for (let l = 0; l < 3; l++) {
+        const n = SIZES[l + 1], m = SIZES[l], s = l === 0 ? 0.12 : 0.7;
+        NET.W.push(Float64Array.from({ length: n * m }, () => gauss(r) * s));
+        NET.b.push(Float64Array.from({ length: n }, () => gauss(r) * 0.4));
+    }
+}
+
+function forward(x) {
+    const A = [x];
+    for (let l = 0; l < 3; l++) {
+        const W = NET.W[l], b = NET.b[l], a = A[l], m = a.length, n = b.length;
+        const out = new Float64Array(n);
+        for (let j = 0; j < n; j++) {
+            let s = b[j];
+            for (let k = 0; k < m; k++) {
+                s += W[j * m + k] * a[k];
+            }
+            out[j] = sig(s);
+        }
+        A.push(out);
+    }
+    return A;
+}
+
+function costOf(A, y) {
+    let C = 0;
+    for (let j = 0; j < 10; j++) {
+        C += (A[3][j] - (j === y ? 1 : 0)) ** 2;
+    }
+    return C;
+}
+
+function backward(A, y) {
+    const D = [];
+    D[2] = Float64Array.from(A[3], (a, j) => 2 * (a - (j === y ? 1 : 0)) * a * (1 - a));
+    for (let l = 2; l > 0; l--) {
+        const W = NET.W[l], m = SIZES[l], n = SIZES[l + 1];
+        D[l - 1] = new Float64Array(m);
+        for (let k = 0; k < m; k++) {
+            let s = 0;
+            for (let j = 0; j < n; j++) {
+                s += W[j * m + k] * D[l][j];
+            }
+            D[l - 1][k] = s * A[l][k] * (1 - A[l][k]);
+        }
+    }
+    const g = new Float64Array(NPARAM);
+    for (let l = 0; l < 3; l++) {
+        const m = SIZES[l];
+        for (let j = 0; j < SIZES[l + 1]; j++) {
+            g[OFF.b[l] + j] = D[l][j];
+            for (let k = 0; k < m; k++) {
+                g[OFF.W[l] + j * m + k] = D[l][j] * A[l][k];
+            }
+        }
+    }
+    return { D, g };
+}
+
+function applyUpdate(avg) {
+    for (let l = 0; l < 3; l++) {
+        const W = NET.W[l], b = NET.b[l];
+        for (let i = 0; i < W.length; i++) {
+            W[i] -= ETA * avg[OFF.W[l] + i];
+        }
+        for (let j = 0; j < b.length; j++) {
+            b[j] -= ETA * avg[OFF.b[l] + j];
+        }
+    }
+}
+
+function meanCost() {
+    return IMGS.reduce((s, im) => s + costOf(forward(im.x), im.y), 0) / IMGS.length;
+}
+
+/* ---------------- timeline ---------------- */
+const PHASES = [];
+for (let i = 0; i < 3; i++) {
+    PHASES.push({ k: 'enter', i, d: 800 }, { k: 'fwd', i, d: 1300 }, { k: 'want', i, d: 800 },
+        { k: 'bwd', i, d: 1300 }, { k: 'col', i, d: 800 });
+}
+PHASES.push({ k: 'avg', d: 1800 }, { k: 'upd', d: 2000 }, { k: 'hold', d: 1200 });
+let ph = 0, pt = 0, speed = 1, playing = true, step = 1, last = 0, applied = false;
+let A = null, D = null, cols = [], avg = null, costs = [], cBefore = 0, cAfter = 0;
+
+function startPhase() {
+    const P = PHASES[ph];
+    applied = false;
+    if (P.k === 'enter' && P.i === 0) {
+        cols = [];
+        avg = null;
+        A = null;
+        cBefore = meanCost();
+        if (!costs.length) {
+            costs.push(cBefore);
+        }
+    }
+    if (P.k === 'enter') {
+        A = null;
+        D = null;
+    }
+    if (P.k === 'fwd') {
+        A = forward(IMGS[P.i].x);
+    }
+    if (P.k === 'bwd') {
+        const r = backward(A, IMGS[P.i].y);
+        D = r.D;
+        cols[P.i] = r.g;
+    }
+    if (P.k === 'avg') {
+        A = null;
+        D = null;
+        avg = new Float64Array(NPARAM);
+        for (const g of cols) {
+            for (let i = 0; i < NPARAM; i++) {
+                avg[i] += g[i] / cols.length;
+            }
+        }
+    }
+}
+
+function advance(dt) {
+    pt += dt * speed;
+    while (pt >= PHASES[ph].d) {
+        pt -= PHASES[ph].d;
+        if (PHASES[ph].k === 'upd' && !applied) {
+            doUpdate();
+        }
+        ph++;
+        if (ph >= PHASES.length) {
+            ph = 0;
+            step++;
+        }
+        startPhase();
+    }
+    const P = PHASES[ph];
+    if (P.k === 'upd' && !applied && pt / P.d >= 0.45) {
+        doUpdate();
+    }
+}
+
+function doUpdate() {
+    applyUpdate(avg);
+    cAfter = meanCost();
+    costs.push(cAfter);
+    applied = true;
+}
+
+function fastForward(n) {
+    if (!costs.length) {
+        costs.push(meanCost());
+    }
+    for (let s = 0; s < n; s++) {
+        const g = new Float64Array(NPARAM);
+        for (const im of IMGS) {
+            const r = backward(forward(im.x), im.y);
+            for (let i = 0; i < NPARAM; i++) {
+                g[i] += r.g[i] / IMGS.length;
+            }
+        }
+        applyUpdate(g);
+        costs.push(meanCost());
+        step++;
+    }
+    ph = 0;
+    pt = 0;
+    startPhase();
+}
+
+/* ---------------- drawing ---------------- */
+const cv = $('scene');
+let c, S;
+
+function resize() {
+    const W = cv.clientWidth, H = W * VH / VW, dpr = window.devicePixelRatio || 1;
+    cv.style.height = H + 'px';
+    cv.width = Math.round(W * dpr);
+    cv.height = Math.round(H * dpr);
+    c = cv.getContext('2d');
+    S = W / VW * dpr;
+}
+
+const NETX = [330, 500, 660], SLOT = { x: 40, y: 150, s: 120 };
+const NODEY = SIZES.slice(1).map(n => {
+    const top = n === 10 ? 85 : 62, bot = n === 10 ? 355 : 378, sp = (bot - top) / (n - 1);
+    return [...Array(n)].map((_, i) => top + sp * i);
+});
+const NODER = [7, 7, 10];
+const COLX = [240, 390, 540], AVGX = 720, ARROWX = 630, ROWY = [552, 592, 632, 700], DOTY = 666, HEADY = 430;
+const BAR = { y: 528, h: 190 };
+
+function arrowTo(x0, y0, x1, y1, col, w) {
+    const a = Math.atan2(y1 - y0, x1 - x0), h = 7 + w * 2.2;
+    c.strokeStyle = c.fillStyle = col;
+    c.lineWidth = w;
+    c.beginPath();
+    c.moveTo(x0, y0);
+    c.lineTo(x1 - Math.cos(a) * h * 0.7, y1 - Math.sin(a) * h * 0.7);
+    c.stroke();
+    c.beginPath();
+    c.moveTo(x1, y1);
+    c.lineTo(x1 - Math.cos(a - 0.42) * h, y1 - Math.sin(a - 0.42) * h);
+    c.lineTo(x1 - Math.cos(a + 0.42) * h, y1 - Math.sin(a + 0.42) * h);
+    c.fill();
+}
+
+function text(s, x, y, size, col, align = 'left', font = 'system-ui, sans-serif', weight = '') {
+    c.font = `${weight} ${size}px ${font}`;
+    c.fillStyle = col;
+    c.textAlign = align;
+    c.fillText(s, x, y);
+}
+
+function drawDigit(x, y, s, img, alpha = 1) {
+    const p = s / 28;
+    c.globalAlpha = alpha;
+    c.fillStyle = '#000';
+    c.fillRect(x, y, s, s);
+    for (let i = 0; i < 784; i++) {
+        if (img[i] > 0.03) {
+            const v = Math.round(img[i] * 255);
+            c.fillStyle = `rgb(${v},${v},${v})`;
+            c.fillRect(x + (i % 28) * p, y + Math.floor(i / 28) * p, p + 0.4, p + 0.4);
+        }
+    }
+    c.strokeStyle = BLUE;
+    c.lineWidth = 2;
+    c.strokeRect(x, y, s, s);
+    c.globalAlpha = 1;
+}
+
+function eyes(cx, cy, look) {
+    for (const dx of [-13, 13]) {
+        c.fillStyle = '#fff';
+        c.strokeStyle = '#000';
+        c.lineWidth = 1.5;
+        c.beginPath();
+        c.ellipse(cx + dx, cy, 10, 11, 0, 0, 7);
+        c.fill();
+        c.stroke();
+        c.fillStyle = '#000';
+        c.beginPath();
+        c.arc(cx + dx + look[0] * 4, cy + look[1] * 4 + 1, 4.5, 0, 7);
+        c.fill();
+    }
+}
+
+function signedCol(v) {
+    return v >= 0 ? BLUE : RED;
+}
+
+function drawNetwork(P, p) {
+    const fwdP = P.k === 'fwd' ? p : ['want', 'bwd', 'col'].includes(P.k) ? 1 : 0;
+    const lit = l => clamp01((fwdP - l * 0.25) / 0.25);
+    const sweepX = P.k === 'bwd' ? 860 - ease(p) * 840 : ['col'].includes(P.k) ? -100 : 2000;
+    const gradOn = x => D && x > sweepX;
+    const flash = P.k === 'upd' ? Math.max(0, Math.sin(clamp01((p - 0.3) / 0.4) * Math.PI)) : 0;
+
+    /* input fan */
+    const ex = SLOT.x + SLOT.s;
+    const mxd0 = D ? Math.max(...D[0].map(Math.abs)) || 1 : 1;
+    for (let j = 0; j < 16; j++) {
+        for (let t = 0; t < 7; t++) {
+            const y0 = SLOT.y + (t + 0.5) / 7 * SLOT.s;
+            if (gradOn((ex + NETX[0]) / 2)) {
+                const g = -D[0][j] / mxd0;
+                c.strokeStyle = signedCol(g);
+                c.globalAlpha = 0.06 + 0.45 * Math.abs(g);
+            } else {
+                c.strokeStyle = fwdP > 0 ? '#5a5a5a' : '#333';
+                c.globalAlpha = 0.35 + 0.4 * lit(1) * (fwdP < 1 ? 1 : 0);
+            }
+            c.lineWidth = 0.8;
+            c.beginPath();
+            c.moveTo(ex, y0);
+            c.lineTo(NETX[0] - NODER[0], NODEY[0][j]);
+            c.stroke();
+        }
+    }
+    /* weight edges */
+    for (let l = 1; l < 3; l++) {
+        const W = NET.W[l], m = SIZES[l], n = SIZES[l + 1];
+        let mw = 1e-9, mg = 1e-12;
+        for (let j = 0; j < n; j++) {
+            for (let k = 0; k < m; k++) {
+                mw = Math.max(mw, Math.abs(W[j * m + k]));
+                if (D) {
+                    mg = Math.max(mg, Math.abs(D[l][j] * A[l][k]));
+                }
+            }
+        }
+        const showGrad = gradOn((NETX[l - 1] + NETX[l]) / 2);
+        for (let j = 0; j < n; j++) {
+            for (let k = 0; k < m; k++) {
+                let v, a;
+                if (showGrad) {
+                    v = -D[l][j] * A[l][k] / mg;
+                    a = 0.05 + 0.85 * Math.abs(v) ** 1.2;
+                } else {
+                    v = W[j * m + k] / mw;
+                    a = 0.05 + 0.4 * Math.abs(v) ** 1.5 + flash * 0.5 * Math.abs(v);
+                }
+                c.strokeStyle = signedCol(v);
+                c.globalAlpha = a;
+                c.lineWidth = showGrad ? 0.6 + 2 * Math.abs(v) : 0.7 + flash * 1.5 * Math.abs(v);
+                c.beginPath();
+                c.moveTo(NETX[l - 1] + NODER[l - 1], NODEY[l - 1][k]);
+                c.lineTo(NETX[l] - NODER[l], NODEY[l][j]);
+                c.stroke();
+            }
+        }
+    }
+    c.globalAlpha = 1;
+
+    /* input slot */
+    c.strokeStyle = '#444';
+    c.lineWidth = 1.5;
+    c.setLineDash([5, 5]);
+    c.strokeRect(SLOT.x, SLOT.y, SLOT.s, SLOT.s);
+    c.setLineDash([]);
+    text('784 pixel', SLOT.x + SLOT.s / 2, SLOT.y + SLOT.s + 22, 13, GREY, 'center');
+    if (P.i !== undefined && P.k !== 'enter') {
+        drawDigit(SLOT.x, SLOT.y, SLOT.s, IMGS[P.i].x);
+    }
+
+    /* neurons */
+    for (let l = 0; l < 3; l++) {
+        const mxd = D ? Math.max(...D[l].map(Math.abs)) || 1 : 1;
+        for (let j = 0; j < SIZES[l + 1]; j++) {
+            const x = NETX[l], y = NODEY[l][j];
+            const a = A ? A[l + 1][j] * lit(l + 1) : 0;
+            const v = Math.round(a * 255);
+            c.fillStyle = `rgb(${v},${v},${v})`;
+            c.beginPath();
+            c.arc(x, y, NODER[l], 0, 7);
+            c.fill();
+            if (gradOn(x)) {
+                const g = -D[l][j] / mxd;
+                c.strokeStyle = signedCol(g);
+                c.lineWidth = 1.5 + 2.5 * Math.abs(g);
+            } else {
+                c.strokeStyle = '#d0d0d0';
+                c.lineWidth = 1.2;
+            }
+            c.stroke();
+        }
+    }
+    /* outputs: labels, bars, desired nudges */
+    const bx = 700, bw = 120, wantP = P.k === 'want' ? ease(p) : ['bwd', 'col'].includes(P.k) ? 1 : 0;
+    for (let j = 0; j < 10; j++) {
+        const y = NODEY[2][j], tgt = P.i !== undefined && j === IMGS[P.i].y && A;
+        text(j, NETX[2] + 18, y + 5, 15, tgt ? YEL : GREY, 'left', SERIF);
+        c.fillStyle = '#1b1b1b';
+        c.fillRect(bx, y - 4, bw, 8);
+        if (A) {
+            const a = A[3][j] * lit(3);
+            c.fillStyle = tgt ? YEL : '#bdbdbd';
+            c.fillRect(bx, y - 4, bw * a, 8);
+            const want = tgt ? 1 : 0, diff = want - A[3][j];
+            if (wantP > 0 && Math.abs(diff) * bw > 5) {
+                const x1 = bx + bw * (A[3][j] + diff * wantP);
+                arrowTo(bx + bw * A[3][j], y - 11, x1, y - 11, diff > 0 ? BLUE : RED, 1.8);
+            }
+        }
+    }
+    /* backward sweep line */
+    if (P.k === 'bwd') {
+        const g = c.createLinearGradient(sweepX - 60, 0, sweepX + 4, 0);
+        g.addColorStop(0, 'rgba(255,228,94,0)');
+        g.addColorStop(1, 'rgba(255,228,94,0.35)');
+        c.fillStyle = g;
+        c.fillRect(sweepX - 60, 50, 64, 345);
+        c.fillStyle = YEL;
+        c.fillRect(sweepX, 50, 2.5, 345);
+    }
+}
+
+function drawBarcode(x, g, mx, alpha) {
+    const n = BAR.h, seg = NPARAM / n;
+    c.globalAlpha = alpha;
+    for (let r = 0; r < n; r++) {
+        let best = 0;
+        for (let i = Math.floor(r * seg); i < Math.floor((r + 1) * seg); i++) {
+            if (Math.abs(g[i]) > Math.abs(best)) {
+                best = g[i];
+            }
+        }
+        const t = Math.min(1, Math.abs(best) / mx) ** 0.6;
+        c.fillStyle = signedCol(best);
+        c.globalAlpha = alpha * (0.08 + 0.92 * t);
+        c.fillRect(x, BAR.y + r, 9, 1.05);
+    }
+    c.globalAlpha = 1;
+}
+
+function drawTable(P, p) {
+    /* row labels */
+    ROWS.forEach((idx, r) => text('w' + sub(idx), 175, ROWY[r] + 6, 22, FG, 'right', SERIF, 'italic'));
+    text('⋮', 160, DOTY + 6, 22, GREY, 'center', SERIF);
+    c.strokeStyle = '#2a2a2a';
+    c.lineWidth = 1;
+    for (const y of [...ROWY, DOTY]) {
+        c.beginPath();
+        c.moveTo(60, y + 20);
+        c.lineTo(AVGX + 70, y + 20);
+        c.stroke();
+    }
+
+    let mx = 1e-12;
+    for (const g of cols) {
+        if (g) {
+            for (let i = 0; i < NPARAM; i++) {
+                mx = Math.max(mx, Math.abs(g[i]));
+            }
+        }
+    }
+    /* image headers with eyes + their gradient columns */
+    for (let i = 0; i < 3; i++) {
+        const x = COLX[i], active = P.i === i;
+        const flying = P.k === 'enter' && active;
+        drawDigit(x - 42, HEADY, 84, IMGS[i].x, active || P.i === undefined ? 1 : 0.55);
+        eyes(x, HEADY, active ? [-0.8, -0.6] : [0, 0]);
+        text('∇C' + sub(i + 1), x, HEADY + 106, 16, cols[i] ? FG : '#555', 'center', SERIF, 'italic');
+        if (flying) {
+            const t = ease(p), s = 84 + (SLOT.s - 84) * t;
+            drawDigit(x - 42 + (SLOT.x - x + 42) * t, HEADY + (SLOT.y - HEADY) * t, s, IMGS[i].x, 0.9);
+        }
+        const g = cols[i];
+        if (!g) {
+            continue;
+        }
+        const alpha = P.k === 'col' && active ? ease(p) : 1;
+        c.globalAlpha = alpha;
+        ROWS.forEach((idx, r) => {
+            const v = g[idx];
+            text(fmt(v), x - 6, ROWY[r] + 6, 18, signedCol(v), 'center', SERIF);
+        });
+        text('⋮', x - 6, DOTY + 6, 18, GREY, 'center', SERIF);
+        c.globalAlpha = 1;
+        drawBarcode(x + 52, g, mx, alpha);
+    }
+    /* average column */
+    const avgP = P.k === 'avg' ? p : ['upd', 'hold'].includes(P.k) ? 1 : 0;
+    if (avgP > 0) {
+        const ap = clamp01(avgP / 0.5);
+        ROWY.forEach(y => arrowTo(ARROWX - 30, y, ARROWX - 30 + 44 * ease(ap), y, YEL, 2.5));
+        const vp = clamp01((avgP - 0.45) / 0.4);
+        c.globalAlpha = vp;
+        ROWS.forEach((idx, r) => {
+            const v = avg[idx];
+            text(fmt(v), AVGX, ROWY[r] + 6, 19, signedCol(v), 'center', SERIF, 'bold');
+        });
+        text('⋮', AVGX, DOTY + 6, 18, GREY, 'center', SERIF);
+        c.globalAlpha = 1;
+        drawBarcode(AVGX + 52, avg, mx, vp);
+        text('trung bình', AVGX + 4, HEADY + 40, 15, YEL, 'center');
+        text('∇C', AVGX + 4, HEADY + 106, 20, vp > 0 ? YEL : '#555', 'center', SERIF, 'italic');
+        const pulse = P.k === 'upd' ? 1 + 0.5 * Math.sin(p * Math.PI * 3) : 1;
+        c.strokeStyle = YEL;
+        c.lineWidth = 2 * pulse;
+        c.globalAlpha = vp;
+        c.strokeRect(AVGX - 56, ROWY[0] - 22, 128, ROWY[3] - ROWY[0] + 44);
+        c.globalAlpha = 1;
+    }
+    text('cả 13.002 số →', COLX[0] + 58, BAR.y - 8, 11, GREY, 'center');
+}
+
+function drawUpdateArrow(P, p) {
+    if (P.k !== 'upd') {
+        return;
+    }
+    const t = ease(clamp01(p / 0.45));
+    const x0 = AVGX, y0 = ROWY[0] - 30, x1 = 560, y1 = 395;
+    if (t > 0.02) {
+        arrowTo(x0, y0, x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, YEL, 5);
+    }
+}
+
+function drawCostChart() {
+    const x0 = 880, y0 = 80, w = 195, h = 140;
+    text('cost', x0, y0 - 10, 13, GREY);
+    c.strokeStyle = '#333';
+    c.lineWidth = 1;
+    c.beginPath();
+    c.moveTo(x0, y0);
+    c.lineTo(x0, y0 + h);
+    c.lineTo(x0 + w, y0 + h);
+    c.stroke();
+    if (!costs.length) {
+        return;
+    }
+    const top = costs[0], n = Math.max(costs.length - 1, 12);
+    c.strokeStyle = YEL;
+    c.lineWidth = 2.5;
+    c.beginPath();
+    costs.forEach((v, i) => {
+        const x = x0 + i / n * w, y = y0 + h - v / top * h;
+        i ? c.lineTo(x, y) : c.moveTo(x, y);
+    });
+    c.stroke();
+    const v = costs[costs.length - 1];
+    c.fillStyle = YEL;
+    c.beginPath();
+    c.arc(x0 + (costs.length - 1) / n * w, y0 + h - v / top * h, 4, 0, 7);
+    c.fill();
+    text(v.toFixed(3), x0 + w, y0 - 10, 14, FG, 'right', SERIF);
+    text('số bước →', x0 + w, y0 + h + 18, 11, GREY, 'right');
+}
+
+function drawHeader(P) {
+    const stages = ['đi xuôi', 'lan truyền ngược', 'lấy trung bình', 'cập nhật'];
+    const cur = { enter: 0, fwd: 0, want: 1, bwd: 1, col: 1, avg: 2, upd: 3, hold: 3 }[P.k];
+    let x = 30;
+    stages.forEach((s, i) => {
+        c.font = '14px system-ui, sans-serif';
+        const w = c.measureText(s).width + 40;
+        const on = i === cur;
+        c.fillStyle = on ? 'rgba(255,228,94,0.13)' : '#0e0e0e';
+        c.strokeStyle = on ? YEL : '#333';
+        c.lineWidth = 1.5;
+        c.beginPath();
+        c.roundRect(x, 14, w, 30, 15);
+        c.fill();
+        c.stroke();
+        text(`${i + 1}`, x + 16, 34, 13, on ? YEL : GREY, 'center', 'ui-monospace, monospace', '700');
+        text(s, x + 28, 34, 14, on ? YEL : GREY);
+        x += w + 10;
+    });
+    const img = P.i !== undefined ? ` · ảnh ${P.i + 1}/3` : '';
+    text(`bước ${step}${img}`, 1075, 34, 16, FG, 'right', SERIF);
+}
+
+function drawInfo(P, p) {
+    const x = 840, y = 470;
+    const L = P.i !== undefined ? IMGS[P.i].y : 0;
+    const lines = {
+        enter: ['Ảnh ' + (P.i + 1) + ' vào mạng', ''],
+        fwd: ['Đi xuôi', '784 pixel → 10 output'],
+        want: ['Muốn: ' + L + ' lên 1,', 'các số khác về 0'],
+        bwd: ['Lan truyền ngược', 'tính ∂C/∂ mọi tham số'],
+        col: ['∇C' + sub(P.i + 1) + ': một cột', '13.002 số'],
+        avg: ['∇C = trung bình', '(∇C₁ + ∇C₂ + ∇C₃) / 3'],
+        upd: ['w ← w − η·∇C', 'cả 13.002 tham số cùng lúc'],
+        hold: [`C: ${cBefore.toFixed(3)} → ${cAfter.toFixed(3)}`, 'xong một bước, lặp lại'],
+    }[P.k];
+    const math = ['avg', 'upd', 'hold'].includes(P.k) || P.k === 'col';
+    text(lines[0], x, y, 26, P.k === 'upd' || P.k === 'avg' ? YEL : FG, 'left', math ? SERIF : 'system-ui, sans-serif', math ? '' : '600');
+    text(lines[1], x, y + 34, 17, GREY, 'left', ['avg'].includes(P.k) ? SERIF : 'system-ui, sans-serif');
+    if (P.k === 'upd' && applied) {
+        text(`C: ${cBefore.toFixed(3)} → ${cAfter.toFixed(3)}`, x, y + 80, 20, FG, 'left', SERIF);
+    }
+    /* progress dots for the 3 images */
+    for (let i = 0; i < 3; i++) {
+        const done = cols[i] !== undefined && !(P.k === 'col' && P.i === i && p < 0.5);
+        c.fillStyle = done ? BLUE : '#333';
+        c.beginPath();
+        c.arc(x + 8 + i * 22, y + 140, 7, 0, 7);
+        c.fill();
+    }
+    text('backprop xong', x + 74, y + 145, 13, GREY);
+}
+
+function render() {
+    const P = PHASES[ph], p = pt / P.d;
+    c.setTransform(S, 0, 0, S, 0, 0);
+    c.fillStyle = '#000';
+    c.fillRect(0, 0, VW, VH);
+    drawHeader(P);
+    drawNetwork(P, p);
+    drawCostChart();
+    drawTable(P, p);
+    drawUpdateArrow(P, p);
+    drawInfo(P, p);
+}
+
+function loop(now) {
+    const dt = Math.min(60, now - last);
+    last = now;
+    if (playing) {
+        advance(dt);
+    }
+    render();
+    requestAnimationFrame(loop);
+}
+
+/* ---------------- controls ---------------- */
+$('play').onclick = () => {
+    playing = !playing;
+    $('play').textContent = playing ? '❚❚ Dừng' : '▶ Chạy';
+};
+$('restart').onclick = () => {
+    initNet();
+    costs = [];
+    step = 1;
+    ph = 0;
+    pt = 0;
+    startPhase();
+};
+$('ff').onclick = () => fastForward(20);
+document.querySelectorAll('.spd').forEach(b => {
+    b.onclick = () => {
+        speed = +b.dataset.s;
+        document.querySelectorAll('.spd').forEach(o => o.classList.toggle('on', o === b));
+    };
+});
+window.addEventListener('resize', resize);
+
+initNet();
+resize();
+startPhase();
+requestAnimationFrame(t => { last = t; loop(t); });
+</script>
+</body>
+</html>
